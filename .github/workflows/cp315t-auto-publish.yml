@@ -1,0 +1,175 @@
+# cp315t auto-publish: build free-threaded wheels from latest upstream and
+# publish to a rolling GitHub Release (tag: cp315t).
+#
+# Triggered daily at 12:00 Beijing time (04:00 UTC). Also supports manual
+# dispatch with an optional "force" flag to build even when upstream is
+# unchanged.
+#
+# Architecture:
+#   check-upstream (ubuntu, ~5s)
+#     Query upstream duckdb/duckdb-python latest main SHA, compare with the
+#     SHA recorded in the last release body. If unchanged and not forced,
+#     skip everything.
+#   build (windows-2022 + ubuntu-24.04 matrix, ~30min)
+#     Checkout latest upstream code (with engine submodule) + our fork's
+#     cp315t branch (patch + test) to _our/. Apply the CMake patch, build
+#     the cp315t wheel, verify tag, run smoke test, upload artifact.
+#   publish (ubuntu)
+#     Download both platform artifacts, delete old release (--cleanup-tag),
+#     create new rolling release with upstream-sha in the body.
+
+name: cp315t-auto-publish
+
+on:
+  schedule:
+    - cron: '0 4 * * *' # 04:00 UTC = 12:00 Beijing
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force build even if upstream is unchanged'
+        type: boolean
+        default: false
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-24.04
+    outputs:
+      should_build: ${{ steps.decide.outputs.should_build }}
+      upstream_sha: ${{ steps.decide.outputs.upstream_sha }}
+    steps:
+      - name: Check upstream for changes
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Latest upstream SHA
+          upstream_sha=$(curl -sf https://api.github.com/repos/duckdb/duckdb-python/commits/main \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'])")
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+
+          # Last published SHA (from release body)
+          last_sha=""
+          body=$(gh release view cp315t --json body -q .body 2>/dev/null || echo "")
+          last_sha=$(echo "$body" | grep -oP 'upstream-sha:\s*\K[a-f0-9]{7,}' | head -1 || echo "")
+
+          force="${{ inputs.force }}"
+          if [[ "$upstream_sha" == "$last_sha" && "$force" != "true" ]]; then
+            echo "No upstream change ($upstream_sha), skipping."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Upstream: $last_sha -> $upstream_sha (force=$force)"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout upstream (latest)
+        uses: actions/checkout@v4
+        with:
+          repository: duckdb/duckdb-python
+          fetch-depth: 0
+          submodules: true
+
+      - name: Checkout our fork (patch + test)
+        uses: actions/checkout@v4
+        with:
+          repository: One-sixth/duckdb-python
+          ref: cp315t
+          path: _our
+
+      - name: Apply cp315t CMake patch
+        run: git apply _our/patches/cp315t-cmake.patch
+
+      - name: Set up Python 3.15t (free-threaded)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.15t"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build pytest "scikit-build-core>=1.0" "nanobind>=3.0" numpy
+
+      - name: Verify GIL is disabled
+        run: |
+          import sys
+          print(f"Python {sys.version}")
+          assert not sys._is_gil_enabled(), "GIL should be disabled"
+        shell: python
+
+      - name: Build wheel
+        run: python -m build --wheel --no-isolation --outdir dist
+
+      - name: Verify wheel tag
+        run: |
+          import glob, os
+          wheels = glob.glob("dist/*.whl")
+          assert len(wheels) == 1, f"Expected 1 wheel, got {wheels}"
+          name = os.path.basename(wheels[0])
+          print(f"Wheel: {name}")
+          assert "cp315-cp315t" in name, f"Expected cp315-cp315t in {name}"
+        shell: python
+
+      - name: Install + smoke test
+        run: |
+          import glob, subprocess, sys
+          wheels = glob.glob("dist/*.whl")
+          subprocess.check_call([sys.executable, "-m", "pip", "install",
+                                 "--no-deps", "--force-reinstall", wheels[0]])
+          subprocess.check_call([sys.executable, "-m", "pytest",
+                                 "_our/tests/fast/test_cp315t_smoke.py", "-v"])
+        shell: python
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ runner.os }}
+          path: dist/*.whl
+
+  publish:
+    needs: [check-upstream, build]
+    if: needs.check-upstream.outputs.should_build == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist/
+      - name: Create rolling release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          upstream_sha="${{ needs.check-upstream.outputs.upstream_sha }}"
+          wheels=$(find dist -name "*.whl" | sort | tr '\n' ' ')
+          echo "Wheels: $wheels"
+
+          # Delete old release + tag (rolling)
+          gh release delete cp315t --cleanup-tag --yes 2>/dev/null || true
+
+          # Write notes to a file (avoids heredoc breaking YAML block scalar)
+          {
+            echo "Auto-published cp315t (free-threaded) wheels."
+            echo ""
+            echo "- upstream-sha: ${upstream_sha}"
+            echo "- date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "- platforms: windows-2022, ubuntu-24.04"
+            echo "- python: 3.15t (free-threaded, GIL disabled)"
+            echo ""
+            echo "Install: pip install <wheel-file>"
+            echo ""
+            echo "This release is rolling: each successful build replaces the previous one."
+          } > release_notes.md
+
+          gh release create cp315t \
+            --title "duckdb cp315t - upstream ${upstream_sha:0:7}" \
+            --notes-file release_notes.md \
+            $wheels
