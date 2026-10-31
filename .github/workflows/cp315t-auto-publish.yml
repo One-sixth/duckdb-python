@@ -74,9 +74,9 @@ jobs:
           echo "upstream_commit=$upstream_commit" >> "$GITHUB_OUTPUT"
 
           # Last published (tag, commit) pair (from release body)
-          body=$(gh release view cp315t --json body -q .body 2>/dev/null || echo "")
-          last_tag=$(echo "$body" | grep -oP 'upstream-tag:\s*\Kv[0-9.]+' | head -1 || echo "")
-          last_commit=$(echo "$body" | grep -oP 'upstream-commit:\s*\K[a-f0-9]{7,}' | head -1 || echo "")
+          body=$(gh release view cp315t --repo One-sixth/duckdb-python --json body -q .body 2>/dev/null || echo "")
+          last_tag=$(echo "$body" | grep -oP 'upstream-tag:\s*\Kv[0-9.]+' | head -1)
+          last_commit=$(echo "$body" | grep -oP 'upstream-commit:\s*\K[a-f0-9]{7,}' | head -1)
 
           force="${{ inputs.force }}"
           if [[ "$upstream_tag" == "$last_tag" && "$upstream_commit" == "$last_commit" && "$force" != "true" ]]; then
@@ -144,7 +144,7 @@ jobs:
           UPSTREAM_TAG: ${{ needs.check-upstream.outputs.upstream_tag }}
         run: |
           import glob, os
-          version = os.environ["UPSTREAM_TAG"].lstrip("v")
+          version = os.environ["UPSTREAM_TAG"].removeprefix("v")
           wheels = glob.glob("dist/*.whl")
           assert len(wheels) == 1, f"Expected 1 wheel, got {wheels}"
           name = os.path.basename(wheels[0])

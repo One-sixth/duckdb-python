@@ -37,8 +37,8 @@ jobs:
 
           # Last dev-built SHA (from the cp315t-dev release body)
           last_sha=""
-          body=$(gh release view cp315t-dev --json body -q .body 2>/dev/null || echo "")
-          last_sha=$(echo "$body" | grep -oP 'upstream-sha:\s*\K[a-f0-9]{7,}' | head -1 || echo "")
+          body=$(gh release view cp315t-dev --repo One-sixth/duckdb-python --json body -q .body 2>/dev/null || echo "")
+          last_sha=$(echo "$body" | grep -oP 'upstream-sha:\s*\K[a-f0-9]{7,}' | head -1)
 
           force="${{ inputs.force }}"
           if [[ "$upstream_sha" == "$last_sha" && "$force" != "true" ]]; then
