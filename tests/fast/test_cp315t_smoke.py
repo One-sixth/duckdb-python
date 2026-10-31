@@ -68,7 +68,7 @@ def test_concurrent_workload():
                 assert cur.execute(f"select count(*) from {t}").fetchone()[0] >= 1
                 cur.execute(f"drop table {t}")
             c.close()
-        except Exception as e:  # noqa: BLE001 - report any failure
+        except Exception as e:
             with lock:
                 errors.append(f"t{tid}: {type(e).__name__}: {e}")
 

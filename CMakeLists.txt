@@ -180,13 +180,13 @@ target_include_directories(
 # __declspec(dllimport) on Windows, producing unresolvable __imp_* references at
 # link time. No-op on non-Windows.
 target_compile_definitions(_duckdb_dependencies INTERFACE DUCKDB_STATIC_BUILD)
-# Free-threaded: the binding objects must see NB_FREE_THREADED so their
-# symbols carry the _ft suffix (matching nanobind-static-ft) and they take
-# the free-threaded API paths. Py_GIL_DISABLED=1 is required on Windows where
-# it is not in pyconfig.h. Both propagate to the module via _duckdb_dependencies.
+# Free-threaded: the binding objects must see NB_FREE_THREADED so their symbols
+# carry the _ft suffix (matching nanobind-static-ft) and they take the
+# free-threaded API paths. Py_GIL_DISABLED=1 is required on Windows where it is
+# not in pyconfig.h. Both propagate to the module via _duckdb_dependencies.
 if(DUCKDB_PY_NB_FLAGS)
-  target_compile_definitions(
-    _duckdb_dependencies INTERFACE NB_FREE_THREADED Py_GIL_DISABLED=1)
+  target_compile_definitions(_duckdb_dependencies INTERFACE NB_FREE_THREADED
+                                                            Py_GIL_DISABLED=1)
 endif()
 
 foreach(flag IN LISTS DUCKDB_PY_ARCHITECTURE_FLAGS)
