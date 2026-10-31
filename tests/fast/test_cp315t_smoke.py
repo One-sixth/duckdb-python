@@ -18,10 +18,13 @@ import threading
 
 import pytest
 
-# Skip on GIL-enabled interpreters (this test is only meaningful on a
-# free-threaded build with the GIL disabled).
+# Skip on GIL-enabled interpreters and on Python < 3.13 (this test is only
+# meaningful on a free-threaded build with the GIL disabled).
+# sys._is_gil_enabled() exists only on Python >= 3.13; the getattr fallback
+# returns True there so older interpreters skip instead of raising
+# AttributeError at collection time.
 pytestmark = pytest.mark.skipif(
-    sys._is_gil_enabled(),
+    getattr(sys, "_is_gil_enabled", lambda: True)(),
     reason="free-threaded interpreter with GIL disabled only",
 )
 
