@@ -1,22 +1,23 @@
-# cp315t auto-publish: build free-threaded wheels from latest upstream and
-# publish to a rolling GitHub Release (tag: cp315t).
+# cp315t auto-publish: build free-threaded wheels from the latest upstream
+# release tag and publish to a rolling GitHub Release (tag: cp315t).
 #
-# Triggered daily at 12:00 Beijing time (04:00 UTC). Also supports manual
-# dispatch with an optional "force" flag to build even when upstream is
-# unchanged.
+# Triggered daily at 12:00 Beijing time (04:00 UTC). The build runs only
+# when upstream duckdb/duckdb-python has a NEW release tag (vX.Y.Z) that we
+# have not published yet. Also supports manual dispatch with an optional
+# "force" flag to rebuild the latest tag even if already published.
 #
 # Architecture:
 #   check-upstream (ubuntu, ~5s)
-#     Query upstream duckdb/duckdb-python latest main SHA, compare with the
-#     SHA recorded in the last release body. If unchanged and not forced,
+#     Query upstream release tags, pick the newest vX.Y.Z, compare with the
+#     tag recorded in the last release body. If unchanged and not forced,
 #     skip everything.
 #   build (windows-2022 + ubuntu-24.04 matrix, ~30min)
-#     Checkout latest upstream code (with engine submodule) + our fork's
-#     cp315t branch (patch + test) to _our/. Apply the CMake patch, build
-#     the cp315t wheel, verify tag, run smoke test, upload artifact.
+#     Checkout upstream at the release tag (with engine submodule) + our
+#     fork's cp315t branch (patch + test) to _our/. Apply the CMake patch,
+#     build the cp315t wheel, verify tag, run smoke test, upload artifact.
 #   publish (ubuntu)
 #     Download both platform artifacts, delete old release (--cleanup-tag),
-#     create new rolling release with upstream-sha in the body.
+#     create new rolling release with upstream-tag in the body.
 
 name: cp315t-auto-publish
 
@@ -26,7 +27,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: 'Force build even if upstream is unchanged'
+        description: 'Force build even if the latest tag is already published'
         type: boolean
         default: false
 
@@ -35,29 +36,44 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       should_build: ${{ steps.decide.outputs.should_build }}
-      upstream_sha: ${{ steps.decide.outputs.upstream_sha }}
+      upstream_tag: ${{ steps.decide.outputs.upstream_tag }}
     steps:
-      - name: Check upstream for changes
+      - name: Check upstream for new release tag
         id: decide
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Latest upstream SHA
-          upstream_sha=$(curl -sf https://api.github.com/repos/duckdb/duckdb-python/commits/main \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'])")
-          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+          # Newest release tag matching vX.Y.Z (skip pre-releases/drafts)
+          upstream_tag=$(gh api repos/duckdb/duckdb-python/releases --paginate \
+            | python3 -c "
+          import sys, json, re
+          rels = json.load(sys.stdin)
+          tags = [r['tag_name'] for r in rels
+                  if re.fullmatch(r'v\d+\.\d+\.\d+', r['tag_name'])
+                  and not r.get('prerelease')]
+          # Semver-ish sort, newest first
+          tags.sort(key=lambda t: tuple(int(x) for x in t[1:].split('.')), reverse=True)
+          print(tags[0] if tags else '')
+          ")
+          if [[ -z "$upstream_tag" ]]; then
+            echo "No upstream release tag found, skipping."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Newest upstream tag: $upstream_tag"
+          echo "upstream_tag=$upstream_tag" >> "$GITHUB_OUTPUT"
 
-          # Last published SHA (from release body)
-          last_sha=""
+          # Last published tag (from release body)
+          last_tag=""
           body=$(gh release view cp315t --json body -q .body 2>/dev/null || echo "")
-          last_sha=$(echo "$body" | grep -oP 'upstream-sha:\s*\K[a-f0-9]{7,}' | head -1 || echo "")
+          last_tag=$(echo "$body" | grep -oP 'upstream-tag:\s*\Kv[0-9.]+' | head -1 || echo "")
 
           force="${{ inputs.force }}"
-          if [[ "$upstream_sha" == "$last_sha" && "$force" != "true" ]]; then
-            echo "No upstream change ($upstream_sha), skipping."
+          if [[ "$upstream_tag" == "$last_tag" && "$force" != "true" ]]; then
+            echo "Tag $upstream_tag already published, skipping."
             echo "should_build=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Upstream: $last_sha -> $upstream_sha (force=$force)"
+            echo "Tag: $last_tag -> $upstream_tag (force=$force)"
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -71,10 +87,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - name: Checkout upstream (latest)
+      - name: Checkout upstream at release tag
         uses: actions/checkout@v4
         with:
           repository: duckdb/duckdb-python
+          ref: ${{ needs.check-upstream.outputs.upstream_tag }}
           fetch-depth: 0
           submodules: true
 
@@ -144,11 +161,12 @@ jobs:
         with:
           pattern: wheel-*
           path: dist/
+
       - name: Create rolling release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          upstream_sha="${{ needs.check-upstream.outputs.upstream_sha }}"
+          upstream_tag="${{ needs.check-upstream.outputs.upstream_tag }}"
           wheels=$(find dist -name "*.whl" | sort | tr '\n' ' ')
           echo "Wheels: $wheels"
 
@@ -159,7 +177,7 @@ jobs:
           {
             echo "Auto-published cp315t (free-threaded) wheels."
             echo ""
-            echo "- upstream-sha: ${upstream_sha}"
+            echo "- upstream-tag: ${upstream_tag}"
             echo "- date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "- platforms: windows-2022, ubuntu-24.04"
             echo "- python: 3.15t (free-threaded, GIL disabled)"
@@ -170,6 +188,6 @@ jobs:
           } > release_notes.md
 
           gh release create cp315t \
-            --title "duckdb cp315t - upstream ${upstream_sha:0:7}" \
+            --title "duckdb cp315t - upstream ${upstream_tag}" \
             --notes-file release_notes.md \
             $wheels
