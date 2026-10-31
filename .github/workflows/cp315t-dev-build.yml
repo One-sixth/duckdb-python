@@ -1,17 +1,13 @@
-# cp315t dev-build: MANUAL workflow. Build free-threaded + regular wheels
-# for ALL supported Python versions from the latest upstream main commit.
+# cp315t dev-build: MANUAL workflow. Build free-threaded (cp315t) wheels
+# from the latest upstream main commit.
 #
-# Complements cp315t-auto-publish (daily, release-tag based, 3.15t only).
-# This one is commit-based and runs only on manual dispatch:
+# Complements cp315t-auto-publish (daily, release-tag based). This one is
+# commit-based and runs only on manual dispatch:
 #   - upstream main HEAD vs the commit recorded in the cp315t-dev release
 #   - newer (or force) -> checkout that commit, apply the CMake patch,
-#     build wheels for every supported Python (3.11-3.15 + 3.15t) on
-#     windows-2022 + ubuntu-24.04, publish all to the rolling
-#     cp315t-dev release
+#     build cp315t wheels on windows-2022 + ubuntu-24.04, publish to the
+#     rolling cp315t-dev release
 #   - unchanged and not forced -> skip
-#
-# The CMake patch is inert for non-free-threaded versions (it only takes
-# effect when NB_ABI matches [0-9]t), so the same patch applies to all.
 
 name: cp315t-dev-build
 
@@ -60,7 +56,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-2022, ubuntu-24.04]
-        python: ["3.11", "3.12", "3.13", "3.14", "3.15", "3.15t"]
+        python: ["3.15t"]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -80,48 +76,39 @@ jobs:
           path: _our
 
       - name: Apply cp315t CMake patch
-        # Inert for non-free-threaded versions (patch only takes effect
-        # when NB_ABI matches [0-9]t), so it applies to all versions.
         run: git apply _our/patches/cp315t-cmake.patch
 
-      - name: Set up Python ${{ matrix.python }}
+      - name: Set up Python 3.15t (free-threaded)
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
+          python-version: "3.15t"
 
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install build pytest "scikit-build-core>=1.0" "nanobind>=3.0" numpy
 
-      - name: Show interpreter
+      - name: Verify GIL is disabled
         run: |
           import sys
           print(f"Python {sys.version}")
-          print(f"GIL enabled: {sys._is_gil_enabled()}")
+          assert not sys._is_gil_enabled(), "GIL should be disabled"
         shell: python
 
       - name: Build wheel
         run: python -m build --wheel --no-isolation --outdir dist
 
       - name: Verify wheel tag
-        env:
-          MATRIX_PY: ${{ matrix.python }}
         run: |
           import glob, os
-          py = "${{ matrix.python }}"
-          core = "cp" + py.replace(".", "")          # cp311 ... cp315t
-          expected = f"{core[:-1]}-{core}" if core.endswith("t") else f"{core}-{core}"
           wheels = glob.glob("dist/*.whl")
           assert len(wheels) == 1, f"Expected 1 wheel, got {wheels}"
           name = os.path.basename(wheels[0])
           print(f"Wheel: {name}")
-          assert expected in name, f"Expected {expected} in {name}"
+          assert "cp315-cp315t" in name, f"Expected cp315-cp315t in {name}"
         shell: python
 
       - name: Install + smoke test
-        # On GIL-enabled interpreters the smoke tests skip themselves
-        # (skipif sys._is_gil_enabled()); the install is still a check.
         run: |
           import glob, subprocess, sys
           wheels = glob.glob("dist/*.whl")
@@ -134,7 +121,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ runner.os }}-${{ matrix.python }}
+          name: wheel-${{ runner.os }}
           path: dist/*.whl
 
   publish:
@@ -161,12 +148,12 @@ jobs:
           gh release delete cp315t-dev --cleanup-tag --yes 2>/dev/null || true
 
           {
-            echo "Dev cp315t + regular wheels from upstream main."
+            echo "Dev cp315t (free-threaded) wheels from upstream main."
             echo ""
             echo "- upstream-sha: ${upstream_sha}"
             echo "- date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "- platforms: windows-2022, ubuntu-24.04"
-            echo "- python: 3.11, 3.12, 3.13, 3.14, 3.15, 3.15t (free-threaded)"
+            echo "- python: 3.15t (free-threaded, GIL disabled)"
             echo "- wheels: ${count}"
             echo ""
             echo "Install: pip install <wheel-file>"
