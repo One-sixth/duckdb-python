@@ -2,22 +2,25 @@
 # release tag and publish to a rolling GitHub Release (tag: cp315t).
 #
 # Triggered daily at 12:00 Beijing time (04:00 UTC). The build runs only
-# when upstream duckdb/duckdb-python has a NEW release tag (vX.Y.Z) that we
-# have not published yet. Also supports manual dispatch with an optional
-# "force" flag to rebuild the latest tag even if already published.
+# when upstream duckdb/duckdb-python has a NEW release tag (vX.Y.Z), or the
+# newest tag was re-pointed to a different commit, and we have not published
+# that (tag, commit) pair yet. Also supports manual dispatch with an
+# optional "force" flag to rebuild the latest tag even if already published.
 #
 # Architecture:
 #   check-upstream (ubuntu, ~5s)
-#     Query upstream release tags, pick the newest vX.Y.Z, compare with the
-#     tag recorded in the last release body. If unchanged and not forced,
-#     skip everything.
+#     Query upstream release tags, pick the newest vX.Y.Z and the commit its
+#     tag object points at. Compare (tag, commit) with the pair recorded in
+#     the last release body. If unchanged and not forced, skip everything.
 #   build (windows-2022 + ubuntu-24.04 matrix, ~30min)
 #     Checkout upstream at the release tag (with engine submodule) + our
 #     fork's cp315t branch (patch + test) to _our/. Apply the CMake patch,
-#     build the cp315t wheel, verify tag, run smoke test, upload artifact.
+#     build the cp315t wheel with OVERRIDE_GIT_DESCRIBE=<tag> so the wheel
+#     carries the clean release version (duckdb-2.0.0-cp315-cp315t), verify
+#     tag, run smoke test, upload artifact.
 #   publish (ubuntu)
 #     Download both platform artifacts, delete old release (--cleanup-tag),
-#     create new rolling release with upstream-tag in the body.
+#     create new rolling release with upstream tag + commit in the body.
 
 name: cp315t-auto-publish
 
@@ -37,6 +40,7 @@ jobs:
     outputs:
       should_build: ${{ steps.decide.outputs.should_build }}
       upstream_tag: ${{ steps.decide.outputs.upstream_tag }}
+      upstream_commit: ${{ steps.decide.outputs.upstream_commit }}
     steps:
       - name: Check upstream for new release tag
         id: decide
@@ -63,17 +67,23 @@ jobs:
           echo "Newest upstream tag: $upstream_tag"
           echo "upstream_tag=$upstream_tag" >> "$GITHUB_OUTPUT"
 
-          # Last published tag (from release body)
-          last_tag=""
+          # Commit the tag resolves to (the commits API peels annotated
+          # tags down to the commit; lightweight tags are commits already)
+          upstream_commit=$(gh api "repos/duckdb/duckdb-python/commits/$upstream_tag" -q .sha)
+          echo "Tag commit: $upstream_commit"
+          echo "upstream_commit=$upstream_commit" >> "$GITHUB_OUTPUT"
+
+          # Last published (tag, commit) pair (from release body)
           body=$(gh release view cp315t --json body -q .body 2>/dev/null || echo "")
           last_tag=$(echo "$body" | grep -oP 'upstream-tag:\s*\Kv[0-9.]+' | head -1 || echo "")
+          last_commit=$(echo "$body" | grep -oP 'upstream-commit:\s*\K[a-f0-9]{7,}' | head -1 || echo "")
 
           force="${{ inputs.force }}"
-          if [[ "$upstream_tag" == "$last_tag" && "$force" != "true" ]]; then
-            echo "Tag $upstream_tag already published, skipping."
+          if [[ "$upstream_tag" == "$last_tag" && "$upstream_commit" == "$last_commit" && "$force" != "true" ]]; then
+            echo "Tag $upstream_tag @ $upstream_commit already published, skipping."
             echo "should_build=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Tag: $last_tag -> $upstream_tag (force=$force)"
+            echo "Tag: $last_tag @ $last_commit -> $upstream_tag @ $upstream_commit (force=$force)"
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -123,16 +133,24 @@ jobs:
         shell: python
 
       - name: Build wheel
+        env:
+          # Force the clean release version (e.g. 2.0.0) instead of the
+          # default <declared>.dev<timestamp> that git-checkout builds get.
+          OVERRIDE_GIT_DESCRIBE: ${{ needs.check-upstream.outputs.upstream_tag }}
         run: python -m build --wheel --no-isolation --outdir dist
 
       - name: Verify wheel tag
+        env:
+          UPSTREAM_TAG: ${{ needs.check-upstream.outputs.upstream_tag }}
         run: |
           import glob, os
+          version = os.environ["UPSTREAM_TAG"].lstrip("v")
           wheels = glob.glob("dist/*.whl")
           assert len(wheels) == 1, f"Expected 1 wheel, got {wheels}"
           name = os.path.basename(wheels[0])
           print(f"Wheel: {name}")
           assert "cp315-cp315t" in name, f"Expected cp315-cp315t in {name}"
+          assert name.startswith(f"duckdb-{version}-"), f"Expected version {version} in {name}"
         shell: python
 
       - name: Install + smoke test
@@ -167,6 +185,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           upstream_tag="${{ needs.check-upstream.outputs.upstream_tag }}"
+          upstream_commit="${{ needs.check-upstream.outputs.upstream_commit }}"
           wheels=$(find dist -name "*.whl" | sort | tr '\n' ' ')
           echo "Wheels: $wheels"
 
@@ -178,6 +197,7 @@ jobs:
             echo "Auto-published cp315t (free-threaded) wheels."
             echo ""
             echo "- upstream-tag: ${upstream_tag}"
+            echo "- upstream-commit: ${upstream_commit}"
             echo "- date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "- platforms: windows-2022, ubuntu-24.04"
             echo "- python: 3.15t (free-threaded, GIL disabled)"
