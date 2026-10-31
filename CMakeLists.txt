@@ -74,14 +74,28 @@ if(TARGET Python::SABIModule
    AND NOT NB_ABI MATCHES "[0-9]t")
   set(DUCKDB_PY_STABLE_ABI STABLE_ABI)
   set(DUCKDB_PY_NANOBIND nanobind-static-abi3)
+  set(DUCKDB_PY_NB_FLAGS)
 else()
   set(DUCKDB_PY_STABLE_ABI)
-  set(DUCKDB_PY_NANOBIND nanobind-static)
+  if(NB_ABI MATCHES "[0-9]t")
+    # Free-threaded: use the -ft variant so nb_internals.cpp compiles with
+    # NB_FREE_THREADED and the module declares Py_mod_gil = NOT_USED.
+    set(DUCKDB_PY_NANOBIND nanobind-static-ft)
+    set(DUCKDB_PY_NB_FLAGS FREE_THREADED)
+  else()
+    set(DUCKDB_PY_NANOBIND nanobind-static)
+    set(DUCKDB_PY_NB_FLAGS)
+  endif()
 endif()
 # Build nanobind's core support library up front so the object libraries below
 # (which include nanobind headers via the umbrella) compile against its include
 # dirs + Python headers + flags.
 nanobind_build_library(${DUCKDB_PY_NANOBIND})
+if(DUCKDB_PY_NB_FLAGS)
+  # Windows: Py_GIL_DISABLED is not in pyconfig.h; nanobind's -ft variant
+  # requires it defined alongside NB_FREE_THREADED.
+  target_compile_definitions(${DUCKDB_PY_NANOBIND} PUBLIC Py_GIL_DISABLED=1)
+endif()
 
 # ────────────────────────────────────────────
 # Link time optimization
@@ -166,6 +180,14 @@ target_include_directories(
 # __declspec(dllimport) on Windows, producing unresolvable __imp_* references at
 # link time. No-op on non-Windows.
 target_compile_definitions(_duckdb_dependencies INTERFACE DUCKDB_STATIC_BUILD)
+# Free-threaded: the binding objects must see NB_FREE_THREADED so their
+# symbols carry the _ft suffix (matching nanobind-static-ft) and they take
+# the free-threaded API paths. Py_GIL_DISABLED=1 is required on Windows where
+# it is not in pyconfig.h. Both propagate to the module via _duckdb_dependencies.
+if(DUCKDB_PY_NB_FLAGS)
+  target_compile_definitions(
+    _duckdb_dependencies INTERFACE NB_FREE_THREADED Py_GIL_DISABLED=1)
+endif()
 
 foreach(flag IN LISTS DUCKDB_PY_ARCHITECTURE_FLAGS)
   target_compile_options(_duckdb_dependencies
@@ -198,6 +220,7 @@ nanobind_add_module(
   _duckdb
   NB_STATIC
   ${DUCKDB_PY_STABLE_ABI}
+  ${DUCKDB_PY_NB_FLAGS}
   $<TARGET_OBJECTS:python_src>
   $<TARGET_OBJECTS:python_arrow>
   $<TARGET_OBJECTS:python_engine>
