@@ -128,19 +128,24 @@ jobs:
     needs: [check-upstream, build]
     if: needs.check-upstream.outputs.should_build == 'true' && needs.build.result == 'success'
     runs-on: ubuntu-24.04
+    permissions:
+      # GITHUB_TOKEN defaults to read-only; gh release create/delete need write.
+      contents: write
     steps:
+      - name: Checkout repo (needed for tag creation)
+        # gh release create runs git to create the tag; without a checkout
+        # the publish job has no .git and fails with "not a git repository".
+        # Must run BEFORE the artifact download: the first checkout performs
+        # `git clean -ffdx`, which would wipe the just-downloaded dist/.
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: wheel-*
           path: dist/
-
-      - name: Checkout repo (needed for tag creation)
-        # gh release create runs git to create the tag; without a checkout
-        # the publish job has no .git and fails with "not a git repository".
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
       - name: Create rolling dev release
         env:
