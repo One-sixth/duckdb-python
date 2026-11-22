@@ -79,23 +79,37 @@ jobs:
         # windows-2022's default shell is pwsh; keep one POSIX script for both.
         shell: bash
         run: |
-          # Strict first. The patch pins upstream line context, so any release
-          # that edits near our hunks breaks it; -C1 is a stop-gap so the build
-          # survives, but the real fix is regenerating the patch.
+          # The patch pins upstream line context, so any upstream edit near our
+          # hunks breaks it. Try strict first; on failure retry with -C1 (reduced
+          # context) so the build survives, and print what actually landed. The
+          # real fix is still to regenerate the patch for the new upstream ref.
           patch=_our/patches/cp315t-cmake.patch
           if git apply "$patch"; then
-            echo "Applied with full context."
+            echo "PATCH_APPLY_MODE=strict"
           else
-            echo "::warning::Strict git apply failed; retried with -C1 (reduced context). Regenerate the patch against the new upstream tag."
+            echo "::warning::Strict git apply failed; retried with -C1 (reduced context). Review the diff below and regenerate the patch against the tracked upstream ref."
             git apply -C1 "$patch"
+            echo "PATCH_APPLY_MODE=degraded-c1"
+            git diff
           fi
-          # Every free-threaded edit must be present, and must not have landed
-          # somewhere else.
-          grep -q 'set(DUCKDB_PY_NANOBIND nanobind-static-ft)' CMakeLists.txt
-          grep -q 'PUBLIC Py_GIL_DISABLED=1' CMakeLists.txt
-          grep -q 'INTERFACE NB_FREE_THREADED' CMakeLists.txt
-          grep -qE '^[[:space:]]+[$][{]DUCKDB_PY_NB_FLAGS[}][[:space:]]*$' CMakeLists.txt
-          git diff --stat
+          git diff --numstat
+
+          # The free-threaded edits must be present, near their anchor, and not
+          # duplicated; anything else means the patch landed in the wrong place.
+          fail() { echo "::error::$1"; exit 1; }
+          grep -qF 'set(DUCKDB_PY_NANOBIND nanobind-static-ft)' CMakeLists.txt ||
+            fail 'CMakeLists.txt: nanobind -ft variant missing'
+          grep -qF 'PUBLIC Py_GIL_DISABLED=1' CMakeLists.txt ||
+            fail 'CMakeLists.txt: Py_GIL_DISABLED=1 missing on the nanobind library'
+          grep -qF 'INTERFACE NB_FREE_THREADED' CMakeLists.txt ||
+            fail 'CMakeLists.txt: NB_FREE_THREADED missing on _duckdb_dependencies'
+          [ "$(grep -cE '^[[:space:]]+[$][{]DUCKDB_PY_NB_FLAGS[}][[:space:]]*$' CMakeLists.txt)" = 1 ] ||
+            fail 'CMakeLists.txt: FREE_THREADED flag missing from nanobind_add_module'
+          [ "$(grep -cF 'DUCKDB_PY_NB_FLAGS' CMakeLists.txt)" = 6 ] ||
+            fail 'CMakeLists.txt: unexpected number of DUCKDB_PY_NB_FLAGS uses (applied twice or in the wrong place)'
+          grep -A12 -F 'INTERFACE DUCKDB_STATIC_BUILD' CMakeLists.txt |
+            grep -qF 'Free-threaded: the binding objects' ||
+            fail 'CMakeLists.txt: free-threaded block is not next to DUCKDB_STATIC_BUILD (applied in the wrong place)'
 
       - name: Set up Python 3.15t (free-threaded)
         uses: actions/setup-python@v5
