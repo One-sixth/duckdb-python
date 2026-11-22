@@ -180,6 +180,14 @@ target_include_directories(
 # __declspec(dllimport) on Windows, producing unresolvable __imp_* references at
 # link time. No-op on non-Windows.
 target_compile_definitions(_duckdb_dependencies INTERFACE DUCKDB_STATIC_BUILD)
+
+# NB_DOMAIN gives the module nanobind state of its own: the exit leak report
+# flag, the type registry and the exception translators are otherwise shared
+# with every nanobind extension in the process that has the same ABI key. It
+# must reach the object library that expands NB_MODULE, so it sits here and not
+# on nanobind_add_module.
+target_compile_definitions(_duckdb_dependencies INTERFACE NB_DOMAIN=duckdb)
+
 # Free-threaded: the binding objects must see NB_FREE_THREADED so their symbols
 # carry the _ft suffix (matching nanobind-static-ft) and they take the
 # free-threaded API paths. Py_GIL_DISABLED=1 is required on Windows where it is
